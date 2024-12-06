@@ -28,7 +28,7 @@ if (!dir.exists(dirSave)) {
 
 cl <- makeCluster(20)
 registerDoParallel(cl)
-foreach(i = 1:300, .export = ls(envir = parent.frame()), .packages = packages) %dopar% {
+foreach(i = x1:300, .export = ls(envir = parent.frame()), .packages = packages) %dopar% {
   # i <- 1
   # 1.3. Read data
   simPath <- "results/2.1.simulationSetting150/"
