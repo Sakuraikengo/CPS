@@ -5,7 +5,7 @@ You can do the same breeding simulation to my manuscript when you douwnload thes
 ---
 
 * R
-    * 1.functionCode.R : registering the functions which were used in the scripts
+    * 1.functionCode.R : setting the functions that were used in the scripts
     * 2.0.simulationSetting198.R : simulating the initial population
     * 2.1.simulationSetting150.R : simulating the population in generation 0 by four-way cross
     * 3.0.GS.R : breeding strategy using normal genomic selection
