@@ -1,4 +1,5 @@
 # 1.1. Parameters
+heritabilityVec <- c(0.3, 0.6) # heritability in each simulation
 nProg <- 15 # the number of progeny from each cross
 nProgSelf <- 50 # the number of progeny for selfing
 probSelf <- 1 - (1 / nProgSelf) # probability (which will decide the selection intensity for selfing)
@@ -11,14 +12,60 @@ intensityNext <- qnorm(probNext, 0, 1) #selection intensity (next generation)
 capa <- 2 # how many times can we use each genotype for cross
 nCrosses <- 10 # the number of crosses
 nSelf <- 2 # the number of selfing genotypes for releasing varieties
-nGeneration <- 20 # the number of generations
+nGeneration <- 60 # the number of generations
 nTrait <- 1 # the number of trait
+nRep <- 300 # the number of breeding simulations
 f <- 8 # the generation for evaluation (F8)
 initInd <- 4 # initial number for searching init OC
 maxIter = 1000 # max iteration for searching init OC
-HeStarRatioVec <- c(0.01, 0.1, 0.3) # final genetic diversity ratio
-degreeVec <- c(0.5, 1, 2) # mathmatical degree for the penalty term for OCS
-targetGenerationVec <- c(10, 20) # target generation in OCS
+HeStarRatioVec <- c(0.01) # final genetic diversity ratio
+degreeVec <- c(1) # mathmatical degree for the penalty term for OCS
+targetGenerationVec <- c(60) # target generation in OCS
+
+# collecting phenotypic data
+GetPheno <- function(uMat, sigmaE, nPheno) {
+  phenoList <- lapply(1:length(sigmaE), function(x) {
+    residual <- mvrnorm(n = nPheno, mu = rep(0, nrow(uMat)), Sigma = diag(sigmaE[x], nrow = nrow(uMat)))
+    phenoVec <- rep(uMat[, x], each = nPheno) + c(residual)
+    pheno <- matrix(phenoVec, ncol = 1)
+    rownames(pheno) <- rep(rownames(uMat), each = nPheno)
+    return(pheno)
+  })
+  phenoMat <- do.call(cbind, phenoList)
+  return(phenoMat)
+}
+
+GP <- function(phenoMat, genoMat) {
+  amat <- calcGRM(genoMat = genoMat, methodGRM = "A.mat")
+  Z <- design.Z(pheno.labels = rownames(phenoMat), geno.names = rownames(amat))
+  ZETA <- list(A = list(Z = Z, K = amat))
+
+  markerEffPredMat <- matrix(0, nrow = ncol(genoMat), ncol = ncol(phenoMat))
+  uPredMat <- matrix(0, nrow = nrow(genoMat), ncol = ncol(phenoMat))
+  rownames(markerEffPredMat) <- colnames(genoMat)
+  rownames(uPredMat) <- rownames(genoMat)
+  colnames(markerEffPredMat) <- colnames(uPredMat) <- colnames(phenoMat)
+
+  for (traitInd in 1:ncol(phenoMat)) {
+    # traitInd <- 1
+    model <- EMM.cpp(y = phenoMat[, traitInd], ZETA = ZETA, n.core = 1)
+    # h2 <- model$Vu / (model$Vu + model$Ve)
+
+    # estimate marker effects from estimated genotypic values
+    if (min(eigen(amat)$values) < 1e-08) {
+      diag(amat) <- diag(amat) + 1e-06
+    }
+    mrkEffects <- t(genoMat) %*% solve(genoMat %*% t(genoMat)) %*% model$u
+    mrkEffects <- c(mrkEffects)
+
+    # input the result into matrix
+    markerEffPredMat[, traitInd] <- mrkEffects
+    uPredMat[, traitInd] <- model$u + model$beta
+  }
+  return(list(uPredMat = uPredMat,
+              markerEffPredMat = markerEffPredMat,
+              betaEstimated = model$beta))
+}
 
 # calculating the frequency of desirable qtns and save
 CalcFreqQTNs <- function(genoMat, qtn, qtnMinus, dirSave, i, generation) {
@@ -95,40 +142,109 @@ SummarizeFreq <- function(freqFilePathList, nGeneration, i, cross) {
   dev.off()
 }
 
+# calculating the D(2) matrix based on recombination frequency
+CalcD2 <- function(ObjectMap, markerEffectMat, nTrait, k) {
+  # getting the number of chr
+  nChr <- length(unique(ObjectMap$chr))
 
-# calculating the T matrix based on recombination frequency
-CalcT <- function(ObjectMap, qtn, k) {
-  # selecting SNPs which have non-zero effect
-  ObjectMap <- ObjectMap[ObjectMap$SNPid %in% qtn, ]
+  # separating to each chr
+  D2List <- lapply(unique(ObjectMap$chr), function(eachChr) {
+    # eachChr <- unique(ObjectMap$chr)[2]
+    mapEach <- ObjectMap[ObjectMap$chr == eachChr, ]
+    effectEach <- markerEffectMat[ObjectMap$chr == eachChr, ]
+    markerName <- rownames(mapEach)
 
-  # calculating the distance of each marker set
-  myDist <- sapply(1:nrow(ObjectMap),
-                   function(x) abs(ObjectMap$linkMapPos[x] - ObjectMap$linkMapPos))
+    # calculating the distance of each marker set
+    myDist <- sapply(1:nrow(mapEach),
+                     function(x) abs(mapEach$linkMapPos[x] - mapEach$linkMapPos))
 
-  # check the marker on the same chr or not
-  myCHR1 <- do.call(rbind, lapply(1:nrow(ObjectMap),
-                                  function(x) rep(ObjectMap$chr[x],nrow(ObjectMap))))
-  myCHR2 <- t(myCHR1)
+    # convert the distance to the recombination frequency (Haldane)
+    c1 <- 0.5 * (1 - exp(-2 * (myDist / 100)))
 
-  # convert the distance to the recombination frequency (Haldane)
-  c1 <- 0.5 * (1 - exp(-2 * (myDist / 100)))
-  # r of the markers on the diff chr is 0.5
-  c1[myCHR1 != myCHR2] <- 0.5
+    # r for the future F"k+1" generations
+    ck <- 2*c1*(1 - ((0.5)^k)*(1 - 2*c1)^k) / (1 + 2*c1)
 
-  # r for the future F"k+1" generations
-  ck <- 2*c1*(1 - ((0.5)^k)*(1 - 2*c1)^k) / (1 + 2*c1)
+    # r for the future F"k" generations (for selfing)
+    l <- k - 1
+    cSelf <- 2*c1*(1 - ((0.5)^l)*(1 - 2*c1)^l) / (1 + 2*c1)
 
-  # r for the future F"k" generations (for selfing)
-  l <- k - 1
-  cSelf <- 2*c1*(1 - ((0.5)^l)*(1 - 2*c1)^l) / (1 + 2*c1)
+    D1_1 <- (1 - ck) * (1 - 2*c1) / 4
+    D1_2 <- (1 - 2*ck - (0.5*(1 - 2*c1))^(k)) / 4
+    D1Self_1 <- (1 - cSelf) * (1 - 2*c1) / 4
+    D1Self_2 <- (1 - 2*cSelf - (0.5*(1 - 2*c1))^(l)) / 4
 
-  tMat1 <- (1 - ck) * (1 - 2*c1)
-  tMat2 <- (1 - 2*ck - (0.5*(1 - 2*c1))^(k))
-  tSelf <- (1 - 2*cSelf - (0.5*(1 - 2*c1))^(l))
+    # calculating the D2
+    D2_1 <- diag(effectEach) %*% D1_1 %*% diag(effectEach)
+    D2_2 <- diag(effectEach) %*% D1_2 %*% diag(effectEach)
+    D2Self_1 <- diag(effectEach) %*% D1Self_1 %*% diag(effectEach)
+    D2Self_2 <- diag(effectEach) %*% D1Self_2 %*% diag(effectEach)
 
-  return(list(tMat1 = tMat1, tMat2 = tMat2, tSelf = tSelf))
+    rownames(D2_1) <- rownames(D2_2) <- rownames(D2Self_1) <- rownames(D2Self_2) <- markerName
+    colnames(D2_1) <- colnames(D2_2) <- colnames(D2Self_1) <- colnames(D2Self_2) <- markerName
+
+    return(list(D2 = list(D2_1, D2_2),
+                D2Self = list(D2Self_1, D2Self_2)))
+  })
+  D2 <- lapply(D2List, function(D2ListEach) {
+    D2ListEach$D2
+  })
+  D2Self <- lapply(D2List, function(D2ListEach) {
+    D2ListEach$D2Self
+  })
+  return(list(D2 = D2, D2Self = D2Self))
 }
 
+
+# Calculating the progeny variance for each cross
+CalcVarMat <- function(D2, combInd, gametArray, nTrait) {
+  sigmaMatEachChr <- sapply(D2, function(D2each) {
+    # D2each <- D2[[1]]
+    D2_1_each <- D2each[[1]]
+    D2_2_each <- D2each[[2]]
+    markerName <- rownames(D2_1_each)
+
+    markerMat_1 <- gametArray[, markerName, 1] * 2
+    markerMat_2 <- gametArray[, markerName, 2] * 2
+
+    mu1_1 <- diag(markerMat_1 %*% D2_1_each %*% t(markerMat_1)) / 4
+    mu1_2 <- diag(markerMat_2 %*% D2_1_each %*% t(markerMat_2)) / 4
+    gamma1 <- diag(markerMat_1 %*% D2_1_each %*% t(markerMat_2)) / 4
+    gamma2 <- diag(markerMat_2 %*% D2_1_each %*% t(markerMat_1)) / 4
+
+    gammaMat2_1 <- markerMat_1 %*% D2_2_each %*% t(markerMat_1) / 4
+    gammaMat2_2 <- markerMat_2 %*% D2_2_each %*% t(markerMat_2) / 4
+    mu2_1 <- diag(gammaMat2_1)
+    mu2_2 <- diag(gammaMat2_2)
+    gammaMat2_3 <- markerMat_1 %*% D2_2_each %*% t(markerMat_2) / 4
+    gammaMat2_4 <- markerMat_2 %*% D2_2_each %*% t(markerMat_1) / 4
+
+    p1 <- combInd[1, ]
+    p2 <- combInd[2, ]
+
+    eq1 <- mu1_1[p1] + mu1_2[p1] + mu1_1[p2] + mu1_2[p2]
+    eq2 <- gamma1[p1] + gamma1[p2] + gamma2[p1] + gamma2[p2]
+    eq3 <- mu2_1[p1] + mu2_2[p1] + mu2_1[p2] + mu2_2[p2]
+    eq4 <- sapply(1:length(p1), function(x) {
+      p1Each <- p1[x]
+      p2Each <- p2[x]
+
+      x1_1 <- gammaMat2_1[p1Each, p2Each]
+      x1_2 <- gammaMat2_2[p1Each, p2Each]
+      x1_3 <- gammaMat2_3[p1Each, p2Each]
+      x1_4 <- gammaMat2_4[p1Each, p2Each]
+      x2_1 <- gammaMat2_1[p2Each, p1Each]
+      x2_2 <- gammaMat2_2[p2Each, p1Each]
+      x2_3 <- gammaMat2_3[p2Each, p1Each]
+      x2_4 <- gammaMat2_4[p2Each, p1Each]
+      return(x1_1 + x1_2 + x1_3 + x1_4 + x2_1 + x2_2 + x2_3 + x2_4)
+    })
+    sigmaEach <- eq1 - eq2 + 2*eq3 - eq4
+    return(sigmaEach)
+  })
+  sigmaVec <- apply(sigmaMatEachChr, 1, sum)
+  sigmaMat <- matrix(sigmaVec, ncol = nTrait)
+  return(sigmaMat)
+}
 
 # Extracting the best crosses using Linear Programing(LP)
 LP <- function(predProgMat, # the potential of each cross
@@ -287,70 +403,13 @@ ExtractGamet <- function(nowPop, qtn) {
   return(gametArray)
 }
 
-CalcVarMat <- function(comb, gametArray, markerEffectTrue1, markerEffectTrue2, qtn, tMat1, tMat2, f, nTrait) {
-
-  blockNum <- ncol(comb) %/% 30000 + 1
-  block <- rep(1:blockNum, each = 30000)[1:ncol(comb)]
-  sigmaBlockList <- lapply(1:blockNum, function(x) {
-    # x <- 1
-    combSet <- comb[, block == x]
-
-    # convert to -1 or 1
-    gametArray1 <- (gametArray[combSet[1, ], , ] * 2) - 1
-    gametArray2 <- (gametArray[combSet[2, ], , ] * 2) - 1
-
-    d12 <- gametArray1[, , 1] - gametArray1[, , 2]
-    d34 <- gametArray2[, , 1] - gametArray2[, , 2]
-    d13 <- gametArray1[, , 1] - gametArray2[, , 1]
-    d14 <- gametArray1[, , 1] - gametArray2[, , 2]
-    d23 <- gametArray1[, , 2] - gametArray2[, , 1]
-    d24 <- gametArray1[, , 2] - gametArray2[, , 2]
-
-    sigmaBlockList_j <- lapply(1:ncol(gametArray1[, , 1]), function(j) {
-      # j <- 1
-
-      phi_1j <- (d12[, j]*d12 + d34[, j]*d34) / 16
-      phi_2j <- (d13[, j]*d13 + d14[, j]*d14 + d23[, j]*d23 + d24[, j]*d24) / 16
-
-      tMat1_j <- tMat1[, j]
-      tMat2_j <- tMat2[, j]
-
-      Sigma_j <- tMat2_j * t(phi_2j) + tMat1_j * t(phi_1j)
-
-      if (nTrait == 1) {
-        sigma_j <- t(Sigma_j) %*% markerEffectTrue1[qtn]
-      } else if (nTrait == 2) {
-        sigma_j_1 <- t(Sigma_j) %*% markerEffectTrue1[qtn]
-        sigma_j_2 <- t(Sigma_j) %*% markerEffectTrue2[qtn]
-        sigma_j <- rbind(sigma_j_1, sigma_j_2)
-      }
-      return(sigma_j)
-    })
-    sigmaBlockMat_j <- do.call(cbind, sigmaBlockList_j)
-    if (nTrait == 1) {
-      sigmaBlockMat <- sigmaBlockMat_j %*% markerEffectTrue2[qtn]
-    } else if (nTrait == 2) {
-      sigmaBlockMat1_j <- sigmaBlockMat_j[1:(nrow(sigmaBlockMat_j)/2), ]
-      sigmaBlockMat2_j <- sigmaBlockMat_j[(nrow(sigmaBlockMat_j)/2 + 1):nrow(sigmaBlockMat_j), ]
-      sigmaBlockVec11 <- sigmaBlockMat1_j %*% markerEffectTrue1[qtn]
-      sigmaBlockVec22 <- sigmaBlockMat2_j %*% markerEffectTrue2[qtn]
-      sigmaBlockVec12 <- sigmaBlockMat1_j %*% markerEffectTrue2[qtn]
-      sigmaBlockMat <- cbind(sigmaBlockVec11, sigmaBlockVec22, sigmaBlockVec12)
-    }
-    return(sigmaBlockMat)
-  })
-  sigmaMat <- do.call(rbind, sigmaBlockList)
-  return(sigmaMat)
-}
-
 ExpectedFnValue <- function(sigmaMat, predProgMean, intensityCross) {
   ExpectedProgFn <- predProgMean + intensityCross*sqrt(sigmaMat)
   return(ExpectedProgFn)
 }
 
 
-CreateF8 <- function(selfSelected, nowPop, nProgSelf, markerEffectEstimated, markerEffectTrue, nTrait, generation) {
-
+CreateF8 <- function(selfSelected, nowPop, nProgSelf, markerEffectTrue, nTrait, generation) {
   f8GenerationInd <- str_split(selfSelected[1], pattern = "N")[[1]][1]
   f8Generation <- as.numeric(str_sub(f8GenerationInd, 2)) + 8
   f8Generation <- formatC(f8Generation, width = 2, flag = "0")
@@ -369,15 +428,16 @@ CreateF8 <- function(selfSelected, nowPop, nProgSelf, markerEffectEstimated, mar
                             names = paste0("C", f8Generation, "F", l+1, "N",
                                            formatC(1:nrow(selfNowPop$genoMat), width = 3, flag = "0")))
     selfNextPop <- population$new(name = paste0("F", l+1, " offspring"),
-                            inds = makeCrosses(crosses = selfTable, pop = selfNowPop))
+                                  inds = makeCrosses(crosses = selfTable, pop = selfNowPop))
     selfNowPop <- selfNextPop
   }
   genoMatNew <- selfNowPop$genoMat
-  geneticValTrueNew <- genoMatNew %*% markerEffectTrue
+  geneticValTrueNew <- (genoMatNew - 1) %*% markerEffectTrue
   return(list(genoMat = genoMatNew,
               trueU = geneticValTrueNew,
               generation = generation))
 }
+
 
 # Calculating the He0 (the initial neutral diversity)
 CalcHe0 <- function(genoMat) {
@@ -569,33 +629,25 @@ SearchOptimalOC <- function(selectedInd, predProgMean, comb, combName, K, Z1, Z2
 }
 
 
-SelectForSelfing1 <- function(trueU,
+SelectForSelfing <- function(trueU,
                               gametArray,
-                              markerEffectTrue1,
-                              qtn,
-                              tMat1,
-                              tMatSelf,
-                              f,
+                              D2Self,
                               nTrait,
                               nSelf,
                               intensity) {
-  selfMat <- rbind(rownames(trueU), rownames(trueU))
+  selfInd <- rbind(1:nrow(trueU), 1:nrow(trueU))
 
-  varSelfMat <- CalcVarMat(comb = selfMat,
-                           gametArray = gametArray,
-                           markerEffectTrue1 = markerEffectTrue1,
-                           markerEffectTrue2 = markerEffectTrue1,
-                           qtn = qtn,
-                           tMat1 = tMat1,
-                           tMat2 = tMatSelf,
-                           f = f,
-                           nTrait = nTrait)
-
-
+  varSelfMat <- CalcVarMat(D2 = D2Self,
+                            combInd = selfInd,
+                            gametArray = gametArray,
+                            nTrait = nTrait)
+  varSelfMat[varSelfMat < 0] <- 0
+  rownames(varSelfMat) <- rownames(trueU)
   fnValue <- trueU + intensity*sqrt(varSelfMat)
   selfSelected <- names(sort(fnValue[, 1], decreasing = T))[1:nSelf]
   return(selfSelected)
 }
+
 
 
 RandomMate <- function(cand, nCrosses, nProg, generation) {
@@ -613,7 +665,7 @@ RandomMate <- function(cand, nCrosses, nProg, generation) {
 
 SimSum <- function(pathList, target, baseFileName, index, generationInd, methodFactor, methodColor) {
   resList <- lapply(pathList, function(pathEach) {
-    # pathEach <- pathList[[3]]
+    # pathEach <- pathList[[1]]
     method <- pathEach$method
     path <- pathEach$path
 
@@ -634,11 +686,24 @@ SimSum <- function(pathList, target, baseFileName, index, generationInd, methodF
       resMat0 <- as.matrix(read.csv(resList[[i]], row.names = 1))
       resMat0 <- resMat0[1:dim(resArray)[1], index]
 
+      # read the results of initial population
+      resInit <- readRDS(paste0(path, i, "_resList_0.rds"))
+      trueU <- resInit$trueU
+      predU <- resInit$predU
+      maxU <- max(trueU)
+      accuracy <- cor(trueU, predU)
+      gVar <- var(trueU) * (length(trueU) - 1) / length(trueU)
+      if (length(index) == 2) {
+        resMat0[1, ] <- c(maxU, gVar)
+      } else if (length(index) == 3) {
+        resMat0[1, ] <- c(maxU, gVar, accuracy)
+      }
+
       for (l in 1:length(index)) {
-        if (index[l] == "variance") {
-          resArray[, l, i] <- resMat0[, l]
+        if (grepl(pattern = "^top", index[l])) {
+          resArray[, l, i] <- (resMat0[, l] - maxU) / sqrt(gVar)
         } else {
-          resArray[, l, i] <- (resMat0[, l]) / (resMat0[1, l])
+          resArray[, l, i] <- resMat0[, l]
         }
       }
     }
@@ -669,7 +734,7 @@ SimSum <- function(pathList, target, baseFileName, index, generationInd, methodF
 
   resAllMat <- do.call(rbind, resAllList)
   for (i in 1:length(index)) {
-    # i <- 3
+    # i <- 2
     resIndEach0 <- index[i]
     resIndEach <- paste0(resIndEach0, "$")
 
@@ -697,6 +762,10 @@ SimSum <- function(pathList, target, baseFileName, index, generationInd, methodF
             axis.title.x = element_text(size = 24),
             axis.title.y = element_text(size = 6)) +
       scale_color_manual(values = col)
+
+    if (resIndEach0 == "top") {
+      g <- g + ylim(c(0, 5.1))
+    }
 
     png(paste0(dirSave, target, "_", resIndEach0, ".png"),
         width = 1440, height = 1440, res = 214)
@@ -745,124 +814,9 @@ SimSum <- function(pathList, target, baseFileName, index, generationInd, methodF
       print(g)
       dev.off()
     }
-
   }
 }
 
-SimSumOCS <- function(pathList, target, baseFileName, index, generationInd, methodFactor, methodColor) {
-  resList <- lapply(pathList, function(pathEach) {
-    # pathEach <- pathList[[1]]
-    t <- pathEach$t
-    s <- pathEach$s
-    he <- pathEach$he
-    method <- paste0(t, "_", s, "_", he)
-    path <- pathEach$path
-
-    # sort the file based on file name
-    fileName <- list.files(path, pattern = baseFileName)
-    fileNum <- as.numeric(str_sub(fileName, start = 1, end = -nchar(fileName[1])))
-    fileOrder <- order(fileNum)
-
-    # gathering the results files of "F4" and "Recurrent genomic selection"
-    resList <- list.files(path, pattern = baseFileName, full.names = T)[fileOrder]
-    resArray <- array(data = NA, dim = c(length(generationInd), length(index), nRep))
-    dimnames(resArray) <- list(generationInd,
-                               index,
-                               1:nRep)
-
-    for (i in 1:nRep) {
-      # i <- 1
-      resMat0 <- as.matrix(read.csv(resList[[i]], row.names = 1))
-      resMat0 <- resMat0[1:dim(resArray)[1], index]
-
-      for (l in 1:length(index)) {
-        if (index[l] == "variance") {
-          resArray[, l, i] <- resMat0[, l]
-        } else {
-          resArray[, l, i] <- (resMat0[, l]) / (resMat0[1, l])
-        }
-      }
-    }
-
-    resMeanMat <- apply(resArray, c(1, 2), mean, na.rm = T)
-    resSeMat <- apply(resArray, c(1, 2), std.error, na.rm = T)
-
-    generation <- as.numeric(str_sub(rownames(resMeanMat), start = 2))
-    generationRep <- rep(generation, ncol(resMeanMat))
-    methodRep <- rep(method, length(generationRep))
-    tRep2 <- rep(t, length(generationRep))
-    sRep2 <- rep(s, length(generationRep))
-    heRep2 <- rep(he, length(generationRep))
-    indexRep <- rep(colnames(resMeanMat), each = nrow(resMeanMat))
-    dfEach <- data.frame(Generation = generationRep,
-                         Method = methodRep,
-                         t = tRep2,
-                         s = sRep2,
-                         He = heRep2,
-                         Index = indexRep,
-                         Value = c(resMeanMat),
-                         SE = c(resSeMat))
-    return(list(method = method,
-                resArray = resArray, resDf = dfEach))
-  })
-
-  resAllList <- lapply(resList, function(resListEach) {
-    # resListEach <- resList[[1]]
-    method <- resListEach$method
-    resArrayEach <- resListEach$resArray
-    resFin <- resArrayEach[dim(resArrayEach)[1], , ]
-    rownames(resFin) <- paste0(method, dimnames(resArrayEach)[[2]])
-    return(resFin)
-  })
-
-  resAllMat <- do.call(rbind, resAllList)
-  for (i in 1:length(index)) {
-    # i <- 2
-    resIndEach0 <- index[i]
-    resIndEach <- paste0(resIndEach0, "$")
-
-    resDfList <- lapply(resList, function(resListEach) {
-      # resListEach <- resList[[1]]
-      return(resListEach$resDf)
-    })
-    resDf <- do.call(rbind, resDfList)
-
-    resDfEach <- resDf[resDf$Index == resIndEach0, ]
-    resDfEach$t <- factor(resDfEach$t, levels = targetGenerationVec)
-    resDfEach$s <- factor(resDfEach$s, levels = degreeVec)
-    resDfEach$He <- factor(resDfEach$He, levels = HeStarRatioVec)
-    resDfEach$Method <- factor(resDfEach$Method, levels = methodFactor)
-
-    col <- methodColor
-    comparisonList <- tapply(resDfEach[, "Value"], resDfEach$Method, function(x) {
-      resDfEach[resDfEach$Method == "20_1_0.3", "Value"] / x
-    })
-    comparisonMat <- do.call(rbind, comparisonList)
-    colnames(comparisonMat) <- unique(resDfEach$Generation)
-    write.csv(comparisonMat, paste0(dirSave, target, "_", resIndEach0, "_compare20.csv"))
-
-    comparisonList <- tapply(resDfEach[, "Value"], resDfEach$Method, function(x) {
-      resDfEach[resDfEach$Method == "20_1_0.01", "Value"] / x
-    })
-    comparisonMat <- do.call(rbind, comparisonList)
-    colnames(comparisonMat) <- unique(resDfEach$Generation)
-    write.csv(comparisonMat, paste0(dirSave, target, "_", resIndEach0, "_compare10.csv"))
-
-    g <- ggplot(resDfEach, aes(x = Generation, y = Value, color = He, lty = t)) +
-      geom_line(size = 1.2) +
-      facet_wrap(~ s) +
-      theme(axis.text.x = element_text(size = 20),
-            axis.text.y = element_text(size = 20),
-            axis.title.x = element_text(size = 24),
-            axis.title.y = element_text(size = 6)) +
-      scale_color_manual(values = col)
-
-    png(paste0(dirSave, target, "_", resIndEach0, ".png"),
-        width = 1440, height = 1440, res = 214)
-    print(g)
-    dev.off()
-  }
-}
 
 SimSumAllele <- function(pathList, generationInd, index, methodFactor, methodColor) {
 

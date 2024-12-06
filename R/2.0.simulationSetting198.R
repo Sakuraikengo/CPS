@@ -1,7 +1,7 @@
 ##############################################
 # Title : 2.0.simulationSetting198
 # Author : Kengo Sakurai
-# Date : 2023-07-21
+# Date : 2024-12-03
 ##############################################
 
 ###### 1. Settings ######
@@ -20,7 +20,7 @@ nSNP <- 200 # the number of SNPs in each chr
 nChr <- 20 # the number of chromosomes
 lchr <- 1e9 # physical length of each chr (no meaning)
 lchrCm <- 100 # map length of each chr
-nQtn <- 1000 # the number of QTN
+nQtn <- 1000 # the number of QTNs
 nTrait <- 1
 
 # 1.2. Save dir
@@ -39,24 +39,34 @@ if (file.exists(seedIndCsv)) {
 }
 
 # 1.3. Read data
-genoInfoPath <- "raw_data/genotype/Gm198_HCDB_190207.fil.snp.remHet.MS0.95_bi_MQ20_DP3-1000.MAF0.025.imputed.v2.chrnum.vcf.gz"
-genoInfoRaw0 <- read.vcf(genoInfoPath)
+snpInfoPath <- "results/snpInfoDf.rds"
+genomeMatPath <- "results/genomeMat.rds"
 
-genoInfoRaw0@snps$id <- paste0("Chr",
-                               formatC(genoInfoRaw0@snps$chr, width = 2, flag = "0"),
-                               "_",
-                               formatC(genoInfoRaw0@snps$pos, width = 8, flag = "0"))
-genomeFil <- select.snps(genoInfoRaw0, condition = maf >= 0.1)
-genomeFil <- LD.thin(genomeFil, threshold = threshold)
+# Filtering the SNP marker data
+if (!file.exists(snpInfoPath)) {
+  genoInfoPath <- "raw_data/genotype/Gm198_HCDB_190207.fil.snp.remHet.MS0.95_bi_MQ20_DP3-1000.MAF0.025.imputed.v2.chrnum.vcf.gz"
+  genoInfoRaw0 <- read.vcf(genoInfoPath)
 
-genomeMat <- as.matrix(genomeFil)
-snpInfoList <- str_split(colnames(genomeMat), pattern = "_")
-snpInfoMat <- do.call(rbind, snpInfoList)
-snpInfoDf0 <- data.frame(chr = as.character(snpInfoMat[, 1]),
-                         SNPid = colnames(genomeMat),
-                         physPos = as.numeric(snpInfoMat[, 2]))
-snpInfoDf0 <- snpInfoDf0[order(snpInfoDf0$SNPid), ]
+  genoInfoRaw0@snps$id <- paste0("Chr",
+                                 formatC(genoInfoRaw0@snps$chr, width = 2, flag = "0"),
+                                 "_",
+                                 formatC(genoInfoRaw0@snps$pos, width = 8, flag = "0"))
+  genomeFil <- select.snps(genoInfoRaw0, condition = maf >= 0.1)
+  genomeFil <- LD.thin(genomeFil, threshold = threshold)
+  genomeMat <- as.matrix(genomeFil)
+  saveRDS(genomeMat, file = genomeMatPath)
 
+  snpInfoList <- str_split(colnames(genomeMat), pattern = "_")
+  snpInfoMat <- do.call(rbind, snpInfoList)
+  snpInfoDf0 <- data.frame(chr = as.character(snpInfoMat[, 1]),
+                           SNPid = colnames(genomeMat),
+                           physPos = as.numeric(snpInfoMat[, 2]))
+  snpInfoDf0 <- snpInfoDf0[order(snpInfoDf0$SNPid), ]
+  saveRDS(snpInfoDf0, file = snpInfoPath)
+} else {
+  snpInfoDf0 <- readRDS(snpInfoPath)
+  genomeMat <- readRDS(genomeMatPath)
+}
 # calculating map position
 mapPosList <- tapply(X = snpInfoDf0$physPos, INDEX = snpInfoDf0$chr, function(eachChr) {
   # eachChr <- snpInfoDf0$PysPos[snpInfoDf0$Chr == snpInfoDf0$Chr[1]]
@@ -69,7 +79,7 @@ mapPos <- unlist(mapPosList)
 snpInfoDf <- data.frame(snpInfoDf0,
                         linkMapPos = mapPos)
 
-for (i in 1:300) {
+for (i in 1:nRep) {
   # i <- 1
   # sampling the SNPs (totally nSNPs)
   set.seed(seedInd[i])
@@ -152,3 +162,4 @@ for (i in 1:300) {
   dev.off()
 
 }
+
